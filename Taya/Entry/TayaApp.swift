@@ -14,11 +14,6 @@ struct TayaApp: App {
     var body: some Scene {
         WindowGroup {
             ZStack {
-                // Base layer: matches the native launch screen color so there's
-                // zero flash between the system launch screen and SwiftUI render.
-                Color("LaunchBackgroundColor")
-                    .ignoresSafeArea()
-                
                 HomeView()
                     .opacity(showSplash ? 0 : 1)
                 
