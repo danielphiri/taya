@@ -17,8 +17,8 @@ struct SplashScreenView: View {
             // Gradient background matching the launch image style
             LinearGradient(
                 colors: [
-                    Color("LaunchBackgroundColor"),
-                    Color("GradientDarkColor")
+                    Color("launch_background_color"),
+                    Color("gradient_dark_color")
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -59,8 +59,8 @@ struct SplashScreenView: View {
             VStack {
                 Spacer()
                 
-                Text("taya")
-                    .font(.system(size: 28, weight: .light, design: .rounded))
+                Text("Taya")
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
                     .foregroundColor(.white.opacity(0.85))
                     .tracking(8)
                     .opacity(appearing ? 1 : 0)
