@@ -14,7 +14,7 @@ protocol FileStore: Sendable {
     func write(_ data: Data, to url: URL) throws
 }
 
-/// Production file store backed by `FileManager` and atomic `Data` writes.
+/// File store backed by `FileManager` and atomic `Data` writes.
 struct DiskFileStore: FileStore {
     func fileExists(at url: URL) -> Bool {
         FileManager.default.fileExists(atPath: url.path)

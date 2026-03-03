@@ -2,7 +2,7 @@
 //  LiveAudioCapturePermissionRequester.swift
 //  Taya
 //
-//  Production permission requester backed by AVFoundation and Speech.
+//  Permission requester backed by AVFoundation and Speech.
 //
 
 import AVFoundation

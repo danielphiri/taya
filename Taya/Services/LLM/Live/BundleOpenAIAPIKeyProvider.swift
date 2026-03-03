@@ -2,7 +2,7 @@
 //  BundleOpenAIAPIKeyProvider.swift
 //  Taya
 //
-//  Production API key provider backed by the app bundle.
+//  API key provider backed by the app bundle.
 //
 
 import Foundation

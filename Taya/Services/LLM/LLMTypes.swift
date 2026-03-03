@@ -31,17 +31,12 @@ enum LLMError: Error, LocalizedError {
     }
 }
 
-/// App-facing transcript processing boundary used by the view model and tests.
-protocol LLMProcessing: Sendable {
+/// App-facing boundary for sending transcripts to an LLM backend.
+protocol LLMClient: Sendable {
     func processTranscript(_ transcript: String) async throws -> LLMOutput
 }
 
 /// Boundary for loading the configured OpenAI API key.
 protocol OpenAIAPIKeyProviding: Sendable {
     func apiKey() throws -> String
-}
-
-/// Boundary for executing HTTP requests for LLM processing.
-protocol LLMRequestPerforming: Sendable {
-    func data(for request: URLRequest) async throws -> (Data, URLResponse)
 }
