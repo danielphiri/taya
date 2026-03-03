@@ -2,7 +2,7 @@
 //  TayaUITests.swift
 //  TayaUITests
 //
-//  Created by Neel Makhecha on 9/5/25.
+//  Created by Daniel Phiri on 9/5/25.
 //
 
 import XCTest

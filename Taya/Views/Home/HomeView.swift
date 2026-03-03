@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct HomeView: View {
-    @StateObject private var engine = CaptureEngine()
+    @State private var viewModel = HomeViewModel()
     @State private var selectedCard: MemoryCard?
     @State private var showPermissionAlert = false
     
@@ -23,7 +23,7 @@ struct HomeView: View {
                 headerView
                 
                 // Card list
-                if engine.cards.isEmpty && !engine.isRecording {
+                if viewModel.cards.isEmpty && !viewModel.isRecording {
                     emptyState
                 } else {
                     cardList
@@ -32,16 +32,13 @@ struct HomeView: View {
                 Spacer(minLength: 0)
                 
                 // Live transcript while recording
-                if engine.isRecording {
+                if viewModel.isRecording {
                     liveTranscriptView
                 }
                 
                 // Record button area
                 recordArea
             }
-        }
-        .task {
-            await engine.requestPermissions()
         }
         .sheet(item: $selectedCard) { card in
             CardDetailView(card: card)
@@ -54,7 +51,13 @@ struct HomeView: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text(engine.errorMessage ?? "Microphone and speech recognition access are required to capture voice memories.")
+            Text(viewModel.errorMessage ?? "Microphone and speech recognition access are required to capture voice memories.")
+        }
+        .task {
+            await viewModel.loadPersistedCardsIfNeeded()
+        }
+        .onDisappear {
+            viewModel.cancelAllWork()
         }
     }
     
@@ -67,8 +70,8 @@ struct HomeView: View {
                     .font(.largeTitle)
                     .fontWeight(.bold)
                 
-                if engine.processingCount > 0 {
-                    Text("\(engine.processingCount) processing...")
+                if viewModel.processingCount > 0 {
+                    Text("\(viewModel.processingCount) processing...")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .transition(.opacity.combined(with: .move(edge: .top)))
@@ -77,8 +80,8 @@ struct HomeView: View {
             
             Spacer()
             
-            if !engine.cards.isEmpty {
-                Text("\(engine.cards.filter { $0.state == .completed }.count) memories")
+            if !viewModel.cards.isEmpty {
+                Text("\(viewModel.cards.filter { $0.state == .completed }.count) memories")
                     .font(.subheadline)
                     .foregroundStyle(.tertiary)
             }
@@ -86,7 +89,7 @@ struct HomeView: View {
         .padding(.horizontal, 20)
         .padding(.top, 12)
         .padding(.bottom, 8)
-        .animation(.easeInOut(duration: 0.3), value: engine.processingCount)
+        .animation(.easeInOut(duration: 0.3), value: viewModel.processingCount)
     }
     
     // MARK: - Empty state
@@ -118,13 +121,13 @@ struct HomeView: View {
     private var cardList: some View {
         ScrollView {
             LazyVStack(spacing: 12) {
-                ForEach(engine.cards) { card in
+                ForEach(viewModel.cards) { card in
                     MemoryCardView(
                         card: card,
-                        onRetry: { engine.retryCard(card) },
+                        onRetry: { viewModel.retryCard(card) },
                         onDelete: {
                             withAnimation(.easeOut(duration: 0.3)) {
-                                engine.deleteCard(card)
+                                viewModel.deleteCard(card)
                             }
                         }
                     )
@@ -144,7 +147,7 @@ struct HomeView: View {
                         
                         if case .failed = card.state {
                             Button {
-                                engine.retryCard(card)
+                                viewModel.retryCard(card)
                             } label: {
                                 Label("Retry", systemImage: "arrow.clockwise")
                             }
@@ -152,7 +155,7 @@ struct HomeView: View {
                         
                         Button(role: .destructive) {
                             withAnimation {
-                                engine.deleteCard(card)
+                                viewModel.deleteCard(card)
                             }
                         } label: {
                             Label("Delete", systemImage: "trash")
@@ -170,15 +173,15 @@ struct HomeView: View {
     
     private var liveTranscriptView: some View {
         VStack(spacing: 4) {
-            if !engine.liveTranscript.isEmpty {
-                Text(engine.liveTranscript)
+            if !viewModel.liveTranscript.isEmpty {
+                Text(viewModel.liveTranscript)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
                     .transition(.opacity)
-                    .animation(.easeInOut(duration: 0.3), value: engine.liveTranscript)
+                    .animation(.easeInOut(duration: 0.3), value: viewModel.liveTranscript)
             } else {
                 Text("Listening...")
                     .font(.subheadline)
@@ -194,13 +197,13 @@ struct HomeView: View {
     private var recordArea: some View {
         VStack(spacing: 8) {
             RecordButton(
-                isRecording: engine.isRecording,
-                audioLevel: engine.currentAudioLevel
+                isRecording: viewModel.isRecording,
+                audioLevel: viewModel.currentAudioLevel
             ) {
                 handleRecordTap()
             }
             
-            Text(engine.isRecording ? "Tap to stop" : "Tap to capture")
+            Text(viewModel.isRecording ? "Tap to stop" : "Tap to capture")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }
@@ -210,14 +213,20 @@ struct HomeView: View {
     // MARK: - Actions
     
     private func handleRecordTap() {
-        if engine.isRecording {
-            engine.stopCapture()
+        if viewModel.isRecording {
+            viewModel.stopCapture()
         } else {
-            guard engine.permissionsGranted else {
-                showPermissionAlert = true
-                return
+            Task {
+                if !viewModel.permissionsGranted {
+                    await viewModel.requestPermissions()
+                }
+
+                if viewModel.permissionsGranted {
+                    viewModel.startCapture()
+                } else {
+                    showPermissionAlert = true
+                }
             }
-            engine.startCapture()
         }
     }
 }
