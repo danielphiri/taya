@@ -10,6 +10,48 @@ import CoreGraphics
 import Foundation
 import Speech
 
+private enum AudioLevelMeter {
+    private static let minimumSampleMagnitude: Float = 1e-6
+    private static let silenceFloorDecibels: Float = -50
+    private static let loudVoiceCeilingDecibels: Float = -6
+    
+    /// Converts a single live microphone buffer into a UI-friendly loudness value.
+    ///
+    /// This is called repeatedly during recording, once per incoming audio buffer.
+    /// It reads samples from the buffer's first channel, estimates the buffer's
+    /// loudness using RMS, converts that to decibels, clamps the result to a
+    /// practical speech range, and normalizes it into `0...1` for the level meter.
+    ///
+    /// - Parameter buffer: A short chunk of live PCM audio captured from the microphone.
+    /// - Returns: A normalized loudness value where `0` is silence and `1` is loud speech,
+    ///   or `nil` if the buffer does not expose float channel data.
+    static func normalizedLevel(from buffer: AVAudioPCMBuffer) -> CGFloat? {
+        guard let channelData = buffer.floatChannelData?[0] else { return nil }
+        let frames = buffer.frameLength
+        
+        var sumOfSquares: Float = 0
+        for index in 0..<Int(frames) {
+            let sample = channelData[index]
+            sumOfSquares += sample * sample
+        }
+        
+        let rootMeanSquare = sqrt(sumOfSquares / Float(frames))
+        
+        // Convert the raw signal into decibels so quiet and loud speech map more naturally.
+        let decibelLevel = 20 * log10(max(rootMeanSquare, minimumSampleMagnitude))
+        let clampedDecibelLevel = min(
+            max(decibelLevel, silenceFloorDecibels),
+            loudVoiceCeilingDecibels
+        )
+        
+        // Normalize the clamped speech range into 0...1 for the UI meter.
+        let normalizedRange = (clampedDecibelLevel - silenceFloorDecibels)
+        / (loudVoiceCeilingDecibels - silenceFloorDecibels)
+        
+        return CGFloat(normalizedRange)
+    }
+}
+
 @MainActor
 private final class AudioCaptureStreams {
     let liveTranscriptStream: AsyncStream<String>
@@ -43,48 +85,6 @@ private final class AudioCaptureStreams {
 
     func emitAudioLevel(_ level: CGFloat) {
         audioLevelContinuation?.yield(level)
-    }
-}
-
-private enum AudioLevelMeter {
-    private static let minimumSampleMagnitude: Float = 1e-6
-    private static let silenceFloorDecibels: Float = -50
-    private static let loudVoiceCeilingDecibels: Float = -6
-
-    /// Converts a single live microphone buffer into a UI-friendly loudness value.
-    ///
-    /// This is called repeatedly during recording, once per incoming audio buffer.
-    /// It reads samples from the buffer's first channel, estimates the buffer's
-    /// loudness using RMS, converts that to decibels, clamps the result to a
-    /// practical speech range, and normalizes it into `0...1` for the level meter.
-    ///
-    /// - Parameter buffer: A short chunk of live PCM audio captured from the microphone.
-    /// - Returns: A normalized loudness value where `0` is silence and `1` is loud speech,
-    ///   or `nil` if the buffer does not expose float channel data.
-    static func normalizedLevel(from buffer: AVAudioPCMBuffer) -> CGFloat? {
-        guard let channelData = buffer.floatChannelData?[0] else { return nil }
-        let frames = buffer.frameLength
-
-        var sumOfSquares: Float = 0
-        for index in 0..<Int(frames) {
-            let sample = channelData[index]
-            sumOfSquares += sample * sample
-        }
-
-        let rootMeanSquare = sqrt(sumOfSquares / Float(frames))
-
-        // Convert the raw signal into decibels so quiet and loud speech map more naturally.
-        let decibelLevel = 20 * log10(max(rootMeanSquare, minimumSampleMagnitude))
-        let clampedDecibelLevel = min(
-            max(decibelLevel, silenceFloorDecibels),
-            loudVoiceCeilingDecibels
-        )
-
-        // Normalize the clamped speech range into 0...1 for the UI meter.
-        let normalizedRange = (clampedDecibelLevel - silenceFloorDecibels)
-            / (loudVoiceCeilingDecibels - silenceFloorDecibels)
-
-        return CGFloat(normalizedRange)
     }
 }
 
