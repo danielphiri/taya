@@ -15,7 +15,7 @@ struct HomeView: View {
     var body: some View {
         ZStack(alignment: .bottom) {
             // Background
-            Color(.systemGroupedBackground)
+            Color(.white)
                 .ignoresSafeArea()
             
             VStack(spacing: 0) {
@@ -29,7 +29,7 @@ struct HomeView: View {
                     cardList
                 }
                 
-                Spacer(minLength: 0)
+                Spacer(minLength: 8)
                 
                 // Live transcript while recording
                 if viewModel.isRecording {
@@ -164,8 +164,8 @@ struct HomeView: View {
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.top, 4)
-            .padding(.bottom, 200) // Room for record button
+            .padding(.top, 16)
+            .padding(.bottom, 200)
         }
     }
     
@@ -180,6 +180,7 @@ struct HomeView: View {
                     .lineLimit(3)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
+                    .padding(.vertical, 16)
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.3), value: viewModel.liveTranscript)
             } else {
@@ -202,6 +203,7 @@ struct HomeView: View {
             ) {
                 handleRecordTap()
             }
+            .padding(.top, 16)
             
             Text(viewModel.isRecording ? "Tap to stop" : "Tap to capture")
                 .font(.caption)

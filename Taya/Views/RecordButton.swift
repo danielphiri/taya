@@ -18,8 +18,7 @@ struct RecordButton: View {
     private let buttonSize: CGFloat = 72
     
     /// Purple tint matching the splash screen palette
-    private let accentPurple = Color(red: 0.55, green: 0.35, blue: 0.85)
-    private let deepPurple   = Color(red: 0.40, green: 0.25, blue: 0.75)
+    private let lightGradient = Color("launch_background_color")
     
     /// Smoothed audio level for fluid visuals
     @State private var smoothLevel: CGFloat = 0
@@ -35,7 +34,7 @@ struct RecordButton: View {
                     RecordingWaveformGroup(
                         phase: phase,
                         audioLevel: smoothLevel,
-                        accentColor: accentPurple
+                        accentColor: lightGradient
                     )
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.6)))
@@ -79,7 +78,7 @@ struct RecordButton: View {
             ZStack {
                 // Outer glow ring
                 Circle()
-                    .stroke(accentPurple.opacity(0.25), lineWidth: 3)
+                    .stroke(lightGradient.opacity(0.25), lineWidth: 3)
                     .frame(width: buttonSize + 14, height: buttonSize + 14)
                 
                 // Solid background
@@ -90,15 +89,15 @@ struct RecordButton: View {
                     .frame(width: buttonSize, height: buttonSize)
                     .overlay(
                         Circle()
-                            .fill(accentPurple.opacity(0.15))
+                            .fill(lightGradient.opacity(0.15))
                     )
                 
                 // Stop icon – rounded square
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(accentPurple)
+                    .fill(lightGradient)
                     .frame(width: 24, height: 24)
             }
-            .shadow(color: accentPurple.opacity(0.35), radius: 16, y: 0)
+            .shadow(color: lightGradient.opacity(0.35), radius: 16, y: 0)
         } else {
             // Idle state: elegant purple-tinted circle with mic icon
             ZStack {
@@ -109,23 +108,23 @@ struct RecordButton: View {
                     .frame(width: buttonSize, height: buttonSize)
                     .overlay(
                         Circle()
-                            .fill(accentPurple.opacity(0.1))
+                            .fill(lightGradient.opacity(0.1))
                     )
                     .overlay(
                         Circle()
-                            .stroke(accentPurple.opacity(0.2), lineWidth: 1.5)
+                            .stroke(lightGradient.opacity(0.2), lineWidth: 1.5)
                     )
                 
                 Image(systemName: "mic.fill")
                     .font(.system(size: 26, weight: .medium))
-                    .foregroundStyle(accentPurple)
+                    .foregroundStyle(lightGradient)
             }
-            .shadow(color: accentPurple.opacity(0.12), radius: 10, y: 4)
+            .shadow(color: lightGradient.opacity(0.12), radius: 10, y: 4)
         }
     }
 }
 
-// MARK: - Wave Group (3 layered flowing waveforms driven by voice level)
+// MARK: - Wave Group
 
 private struct RecordingWaveformGroup: View {
     let phase: CGFloat

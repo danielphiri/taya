@@ -24,14 +24,4 @@ enum MemoryCategory: String, Codable, CaseIterable {
         case .other: return "square.grid.2x2.fill"
         }
     }
-    
-    var accentColor: String {
-        switch self {
-        case .shopping: return "categoryGreen"
-        case .learning: return "categoryBlue"
-        case .meeting: return "categoryPurple"
-        case .people: return "categoryOrange"
-        case .other: return "categoryGray"
-        }
-    }
 }

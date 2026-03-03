@@ -23,6 +23,7 @@ struct TayaApp: App {
                         .zIndex(1)
                 }
             }
+            .preferredColorScheme(.dark)
             .onAppear {
                 // Show splash for ~2.2 seconds, then crossfade to content
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
