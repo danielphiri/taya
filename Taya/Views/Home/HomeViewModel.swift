@@ -1,69 +1,109 @@
 //
-//  CaptureEngine.swift
+//  HomeViewModel.swift
 //  Taya
 //
-//  The concurrency backbone of the app.
+//  Main screen state and workflow orchestration.
 //
-//  Design decision: CaptureEngine is an @MainActor ObservableObject that
-//  owns the published cards array for SwiftUI binding. The actual LLM
-//  processing happens in detached Tasks — fire-and-forget background work
-//  that writes results back through the engine.
+//  Responsibilities:
+//  - Load persisted cards when the home screen first appears
+//  - Request audio permissions only when the user tries to record
+//  - Create and update in-progress memory cards for the UI
+//  - Manage one live audio capture session at a time
+//  - Track in-flight recording and LLM tasks explicitly for cleanup and testing
+//  - Send completed transcripts to the injected LLM client without blocking the next capture
+//  - Persist card mutations through the injected store boundary
 //
-//  Why this works for back-to-back captures:
-//  - Each recording session creates a NEW MemoryCard with a unique ID immediately
-//  - The card is inserted into the UI in .transcribing/.processing state
-//  - LLM processing runs in a background Task that captures only the card ID
-//  - When the user taps record again, a new card + new Task is created
-//  - There is NO shared mutable state between concurrent captures
-//  - Each Task independently updates its own card via the actor-isolated PersistenceService
-//
-//  Scaling to 5+ simultaneous captures: each capture is an independent Task
-//  with its own card ID. The only shared resource is the audio hardware
-//  (one recording at a time), but LLM calls are fully concurrent.
+//  Architecture notes:
+//  - `HomeViewModel` is `@MainActor` because it owns UI-facing state.
+//  - Audio capture, LLM access, and persistence are injected behind protocols to
+//    keep the workflow testable without hardware, network, or disk.
+//  - There is only one active recording session at a time, but multiple LLM tasks can
+//    be in flight concurrently after a user finishes back-to-back captures.
+//  - Each background unit of work is stored explicitly so the view can cancel it during
+//    teardown and tests can observe state transitions deterministically.
 //
 
+import CoreGraphics
 import Foundation
-import Combine
+import Observation
 
 @MainActor
-final class CaptureEngine: ObservableObject {
-    
-    // MARK: - Published state
-    @Published var cards: [MemoryCard] = []
-    @Published var isRecording = false
-    @Published var currentAudioLevel: CGFloat = 0.0
-    @Published var liveTranscript: String = ""
-    @Published var permissionsGranted = false
-    @Published var errorMessage: String?
-    @Published var processingCount: Int = 0  // number of in-flight LLM calls
-    
+@Observable
+final class HomeViewModel {
+    // MARK: - View State
+    var cards: [MemoryCard] = []
+    var isRecording = false
+    var currentAudioLevel: CGFloat = 0.0
+    var liveTranscript = ""
+    var permissionsGranted = false
+    var errorMessage: String?
+    var processingCount: Int {
+        llmTasksByCaptureID.count
+    }
+
     // MARK: - Dependencies
-    private var audioService: AudioCaptureService?
-    private let llmService = LLMService.shared
-    private let persistence = PersistenceService.shared
-    
-    // Track the current recording's card ID
+    private let persistence: any MemoryCardStore
+    private let audioClient: any AudioCaptureClient
+    private let llmClient: any LLMClient
+
+    // MARK: - Recording State
+    private var audioSession: (any AudioCaptureSession)?
     private var currentCaptureId: UUID?
-    private var audioLevelCancellable: AnyCancellable?
-    private var transcriptCancellable: AnyCancellable?
-    
+    private var audioLevelTask: Task<Void, Never>?
+    private var transcriptTask: Task<Void, Never>?
+    private var recordingTask: Task<Void, Never>?
+    private var llmTasksByCaptureID: [UUID: Task<Void, Never>] = [:]
+    private var hasLoadedPersistedCards = false
+
     // MARK: - Initialization
-    
-    init() {
-        Task {
-            await loadPersistedCards()
+    /// Creates the home screen model with injected service boundaries.
+    init(
+        persistence: any MemoryCardStore = DiskMemoryCardStore.shared,
+        audioClient: any AudioCaptureClient = LiveAudioCaptureClient(),
+        llmClient: any LLMClient = OpenAILLMClient()
+    ) {
+        self.persistence = persistence
+        self.audioClient = audioClient
+        self.llmClient = llmClient
+    }
+}
+
+// MARK: - Persistence
+
+extension HomeViewModel {
+    func cancelAllWork() {
+        cancelActiveCapture()
+        cancelAllLLMTasks()
+    }
+
+    func loadPersistedCardsIfNeeded() async {
+        guard !hasLoadedPersistedCards else { return }
+        hasLoadedPersistedCards = true
+        await loadPersistedCards()
+    }
+
+    func loadPersistedCards() async {
+        do {
+            cards = try await persistence.loadCards()
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
-    
-    func loadPersistedCards() async {
-        let loaded = await persistence.loadCards()
-        self.cards = loaded
+
+    private func persistCard(_ card: MemoryCard) async {
+        do {
+            try await persistence.save(card: card)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
-    
-    // MARK: - Permissions
-    
+}
+
+// MARK: - Permissions
+
+extension HomeViewModel {
     func requestPermissions() async {
-        let result = await AudioCaptureService.requestPermissions()
+        let result = await audioClient.requestPermissions()
         switch result {
         case .success:
             permissionsGranted = true
@@ -72,163 +112,262 @@ final class CaptureEngine: ObservableObject {
             errorMessage = error.localizedDescription
         }
     }
-    
-    // MARK: - Recording
-    
+}
+
+// MARK: - Recording
+
+extension HomeViewModel {
     func startCapture() {
         guard !isRecording else { return }
-        
-        // Create a new card immediately — user sees it appear in the list
+
+        let card = createRecordingCard()
+        prepareRecordingUI()
+
+        let session = audioClient.makeSession()
+        audioSession = session
+
+        bindAudioStreams(from: session)
+        beginRecording(for: card, using: session)
+    }
+
+    func stopCapture() {
+        guard isRecording else { return }
+
+        audioSession?.stopRecording()
+        stopStreamingAudioUpdates()
+
+        isRecording = false
+        currentAudioLevel = 0.0
+        markCurrentCardAsTranscribing()
+
+        currentCaptureId = nil
+        audioSession = nil
+    }
+
+    private func createRecordingCard() -> MemoryCard {
         let card = MemoryCard(state: .recording)
         currentCaptureId = card.id
         cards.insert(card, at: 0)
-        
+        return card
+    }
+
+    private func prepareRecordingUI() {
         isRecording = true
         liveTranscript = ""
         errorMessage = nil
-        
-        // Create a fresh audio service for this capture
-        let audio = AudioCaptureService()
-        self.audioService = audio
-        
-        // Bind audio level and transcript for UI
-        audioLevelCancellable = audio.$audioLevel
-            .receive(on: RunLoop.main)
-            .assign(to: \.currentAudioLevel, on: self)
-        
-        transcriptCancellable = audio.$liveTranscript
-            .receive(on: RunLoop.main)
-            .assign(to: \.liveTranscript, on: self)
-        
-        // Start recording in a Task — the result comes back when stopCapture() is called
-        let captureId = card.id
-        Task {
-            do {
-                let result = try await audio.startRecording()
-                // Recording finished (stopRecording was called), now process
-                await self.handleRecordingCompleted(captureId: captureId, transcript: result.transcript)
-            } catch {
-                await self.handleRecordingFailed(captureId: captureId, error: error)
+        currentAudioLevel = 0.0
+    }
+
+    private func bindAudioStreams(from session: any AudioCaptureSession) {
+        stopStreamingAudioUpdates()
+
+        audioLevelTask = Task { [weak self] in
+            guard let self else { return }
+            for await audioLevel in session.audioLevelStream {
+                if Task.isCancelled { break }
+                currentAudioLevel = audioLevel
+            }
+        }
+
+        transcriptTask = Task { [weak self] in
+            guard let self else { return }
+            for await transcript in session.liveTranscriptStream {
+                if Task.isCancelled { break }
+                liveTranscript = transcript
             }
         }
     }
-    
-    func stopCapture() {
-        guard isRecording else { return }
-        
-        audioService?.stopRecording()
-        audioLevelCancellable = nil
-        transcriptCancellable = nil
+
+    private func beginRecording(
+        for card: MemoryCard,
+        using session: any AudioCaptureSession
+    ) {
+        let captureId = card.id
+
+        recordingTask = Task { [weak self] in
+            guard let self else { return }
+
+            do {
+                let result = try await session.startRecording()
+                guard !Task.isCancelled else { return }
+                await handleRecordingCompleted(captureId: captureId, transcript: result.transcript)
+            } catch {
+                if error is CancellationError {
+                    return
+                }
+
+                await handleRecordingFailed(captureId: captureId, error: error)
+            }
+
+            clearRecordingTaskIfNeeded(for: captureId)
+        }
+    }
+
+    private func stopStreamingAudioUpdates() {
+        audioLevelTask?.cancel()
+        transcriptTask?.cancel()
+        audioLevelTask = nil
+        transcriptTask = nil
+    }
+
+    private func markCurrentCardAsTranscribing() {
+        guard let captureId = currentCaptureId,
+              let index = indexOfCard(withId: captureId) else { return }
+
+        cards[index].state = .transcribing
+    }
+
+    private func clearRecordingTaskIfNeeded(for captureId: UUID) {
+        guard currentCaptureId != captureId else { return }
+        recordingTask = nil
+    }
+
+    private func cancelActiveCaptureIfNeeded(for captureId: UUID) {
+        guard currentCaptureId == captureId else { return }
+        cancelActiveCapture()
+    }
+
+    private func cancelActiveCapture() {
+        audioSession?.cancel()
+        recordingTask?.cancel()
+        recordingTask = nil
+        stopStreamingAudioUpdates()
+        currentCaptureId = nil
+        audioSession = nil
         isRecording = false
         currentAudioLevel = 0.0
-        
-        // Update card state to transcribing
-        if let id = currentCaptureId, let idx = cards.firstIndex(where: { $0.id == id }) {
-            cards[idx].state = .transcribing
-        }
-        
-        currentCaptureId = nil
-        audioService = nil
+        liveTranscript = ""
     }
-    
-    // MARK: - Processing pipeline
-    
-    /// Called when recording + transcription is done. Fires off LLM processing.
+}
+
+// MARK: - Recording Results
+
+extension HomeViewModel {
     private func handleRecordingCompleted(captureId: UUID, transcript: String) async {
-        guard let idx = cards.firstIndex(where: { $0.id == captureId }) else { return }
-        
-        // If transcript is empty, mark as failed
+        recordingTask = nil
+
+        guard let index = indexOfCard(withId: captureId) else { return }
+
         guard !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            cards[idx].state = .failed("No speech detected. Try again.")
-            await persistence.save(card: cards[idx])
+            cards[index].state = .failed("No speech detected. Try again.")
+            await persistCard(cards[index])
             return
         }
-        
-        // Update card with transcript and move to processing state
-        cards[idx].transcript = transcript
-        cards[idx].state = .processing
-        await persistence.save(card: cards[idx])
-        
-        // Fire off LLM processing — this is the key concurrency moment.
-        // This Task runs independently. The user can start a new recording
-        // while this is in flight. Each Task captures only its captureId.
-        processingCount += 1
-        
-        Task.detached { [llmService] in
-            do {
-                let output = try await llmService.processTranscript(transcript)
-                await MainActor.run { [weak self] in
-                    self?.handleLLMSuccess(captureId: captureId, output: output)
-                }
-            } catch {
-                await MainActor.run { [weak self] in
-                    self?.handleLLMFailure(captureId: captureId, error: error)
-                }
-            }
-        }
+
+        cards[index].transcript = transcript
+        cards[index].state = .processing
+        await persistCard(cards[index])
+
+        enqueueLLMRequest(for: captureId, transcript: transcript)
     }
-    
+
     private func handleRecordingFailed(captureId: UUID, error: Error) async {
-        guard let idx = cards.firstIndex(where: { $0.id == captureId }) else { return }
-        cards[idx].state = .failed(error.localizedDescription)
-        await persistence.save(card: cards[idx])
+        recordingTask = nil
+
+        guard let index = indexOfCard(withId: captureId) else { return }
+
+        cards[index].state = .failed(error.localizedDescription)
+        await persistCard(cards[index])
     }
-    
-    private func handleLLMSuccess(captureId: UUID, output: LLMOutput) {
-        guard let idx = cards.firstIndex(where: { $0.id == captureId }) else { return }
-        cards[idx].result = output
-        cards[idx].state = .completed
-        processingCount -= 1
-        
-        Task {
-            await persistence.save(card: cards[idx])
-        }
-    }
-    
-    private func handleLLMFailure(captureId: UUID, error: Error) {
-        guard let idx = cards.firstIndex(where: { $0.id == captureId }) else { return }
-        cards[idx].state = .failed(error.localizedDescription)
-        processingCount -= 1
-        
-        Task {
-            await persistence.save(card: cards[idx])
-        }
-    }
-    
-    // MARK: - Card management
-    
-    func deleteCard(_ card: MemoryCard) {
-        cards.removeAll { $0.id == card.id }
-        Task {
-            await persistence.delete(cardId: card.id)
-        }
-    }
-    
-    func retryCard(_ card: MemoryCard) {
-        guard let idx = cards.firstIndex(where: { $0.id == card.id }) else { return }
-        let transcript = cards[idx].transcript
-        
-        guard !transcript.isEmpty else {
-            cards[idx].state = .failed("No transcript to retry.")
-            return
-        }
-        
-        cards[idx].state = .processing
-        cards[idx].result = nil
-        processingCount += 1
-        
-        let captureId = card.id
-        Task.detached { [llmService] in
+}
+
+// MARK: - LLM Processing
+
+extension HomeViewModel {
+    private func enqueueLLMRequest(for captureId: UUID, transcript: String) {
+        llmTasksByCaptureID[captureId]?.cancel()
+        llmTasksByCaptureID[captureId] = Task(priority: .userInitiated) { [weak self, llmClient] in
             do {
-                let output = try await llmService.processTranscript(transcript)
-                await MainActor.run { [weak self] in
-                    self?.handleLLMSuccess(captureId: captureId, output: output)
-                }
+                let output = try await llmClient.processTranscript(transcript)
+                guard !Task.isCancelled else { return }
+                self?.handleLLMSuccess(captureId: captureId, output: output)
             } catch {
-                await MainActor.run { [weak self] in
-                    self?.handleLLMFailure(captureId: captureId, error: error)
+                if error is CancellationError {
+                    self?.finishLLMTask(for: captureId)
+                    return
                 }
+
+                self?.handleLLMFailure(captureId: captureId, error: error)
             }
         }
+    }
+
+    private func handleLLMSuccess(captureId: UUID, output: LLMOutput) {
+        guard let index = indexOfCard(withId: captureId) else { return }
+
+        cards[index].result = output
+        cards[index].state = .completed
+        finishLLMTask(for: captureId)
+
+        Task {
+            await persistCard(cards[index])
+        }
+    }
+
+    private func handleLLMFailure(captureId: UUID, error: Error) {
+        guard let index = indexOfCard(withId: captureId) else { return }
+
+        cards[index].state = .failed(error.localizedDescription)
+        finishLLMTask(for: captureId)
+
+        Task {
+            await persistCard(cards[index])
+        }
+    }
+
+    private func finishLLMTask(for captureId: UUID) {
+        llmTasksByCaptureID[captureId] = nil
+    }
+
+    private func cancelLLMTask(for captureId: UUID) {
+        llmTasksByCaptureID[captureId]?.cancel()
+        llmTasksByCaptureID[captureId] = nil
+    }
+
+    private func cancelAllLLMTasks() {
+        for captureId in llmTasksByCaptureID.keys {
+            llmTasksByCaptureID[captureId]?.cancel()
+        }
+        llmTasksByCaptureID.removeAll()
+    }
+}
+
+// MARK: - Card Management
+
+extension HomeViewModel {
+    func deleteCard(_ card: MemoryCard) {
+        cancelActiveCaptureIfNeeded(for: card.id)
+        cancelLLMTask(for: card.id)
+        cards.removeAll { $0.id == card.id }
+
+        Task {
+            do {
+                try await persistence.delete(cardId: card.id)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func retryCard(_ card: MemoryCard) {
+        guard let index = indexOfCard(withId: card.id) else { return }
+        let transcript = cards[index].transcript
+
+        guard !transcript.isEmpty else {
+            cards[index].state = .failed("No transcript to retry.")
+            return
+        }
+
+        cards[index].state = .processing
+        cards[index].result = nil
+        enqueueLLMRequest(for: card.id, transcript: transcript)
+    }
+}
+
+// MARK: - Utilities
+
+extension HomeViewModel {
+    private func indexOfCard(withId id: UUID) -> Int? {
+        cards.firstIndex(where: { $0.id == id })
     }
 }
